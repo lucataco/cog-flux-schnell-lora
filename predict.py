@@ -152,8 +152,10 @@ class Predictor(BasePredictor):
                 print(f"Weight name from URL: {weight_name}")
                 self.txt2img_pipe.load_lora_weights(huggingface_slug, weight_name=weight_name)
             elif re.match(r"^https?://.*\.safetensors$", hf_lora):
-                print(f"Downloading LoRA weights from URL: {hf_lora}")
                 lora_path = "/tmp/lora.safetensors"
+                if os.path.exists(lora_path):
+                    os.remove(lora_path)
+                print(f"Downloading LoRA weights from URL: {hf_lora}")
                 download_weights(hf_lora, lora_path, file=True)
                 self.txt2img_pipe.load_lora_weights(lora_path)
             else:
