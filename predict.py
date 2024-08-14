@@ -142,18 +142,22 @@ class Predictor(BasePredictor):
             joint_attention_kwargs={"scale": lora_scale}
             flux_kwargs["joint_attention_kwargs"] = joint_attention_kwargs
             if re.match(r"^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$", hf_lora):
-                print(f"Loading LoRA weights from HF path: {hf_lora}")
+                print(f"Loading LoRA weights from HF path:{hf_lora}")
                 self.txt2img_pipe.load_lora_weights(hf_lora)
+            elif re.match(r"^https?://huggingface.co", hf_lora):
+                print(f"Downloading LoRA weights from HF URL: {hf_lora}")
+                huggingface_slug = re.search(r"^https?://huggingface.co/([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)", hf_lora).group(1)
+                print(f"HuggingFace slug from URL: {huggingface_slug}")
+                weight_name = hf_lora.split('/')[-1]
+                print(f"Weight name from URL: {weight_name}")
+                self.txt2img_pipe.load_lora_weights(huggingface_slug, weight_name=weight_name)
             elif re.match(r"^https?://.*\.safetensors$", hf_lora):
                 print(f"Downloading LoRA weights from URL: {hf_lora}")
-                lora_path = "/tmp/lora_weights.safetensors"
+                lora_path = "/tmp/lora.safetensors"
                 download_weights(hf_lora, lora_path, file=True)
                 self.txt2img_pipe.load_lora_weights(lora_path)
-            elif os.path.isfile(hf_lora) and hf_lora.endswith('.safetensors'):
-                print(f"Loading LoRA weights from local file: {hf_lora}")
-                self.txt2img_pipe.load_lora_weights(hf_lora)
             else:
-                raise Exception(f"Invalid parameter, must be a HuggingFace path, URL to a .safetensors file, or local path to a .safetensors file: {hf_lora}")
+                raise Exception(f"Invalid parameter for hf_lora, must be a HuggingFace path/URL, or URL to a .safetensors file")
 
         generator = torch.Generator("cuda").manual_seed(seed)
 
