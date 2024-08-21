@@ -10,23 +10,38 @@ import subprocess
 import numpy as np
 from typing import List
 from diffusers import FluxPipeline
+from weights import WeightsDownloadCache
 from transformers import CLIPImageProcessor
 from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker
 )
 
-MODEL_CACHE = "checkpoints"
-MODEL_URL = "https://weights.replicate.delivery/default/black-forest-labs/FLUX.1-schnell/model.tar"
+MODEL_CACHE = "FLUX.1-schnell"
+MODEL_URL = "https://weights.replicate.delivery/default/black-forest-labs/FLUX.1-schnell/files.tar"
 SAFETY_CACHE = "safety-cache"
 FEATURE_EXTRACTOR = "/src/feature-extractor"
 SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
+
+ASPECT_RATIOS = {
+    "1:1": (1024, 1024),
+    "16:9": (1344, 768),
+    "21:9": (1536, 640),
+    "3:2": (1216, 832),
+    "2:3": (832, 1216),
+    "4:5": (896, 1088),
+    "5:4": (1088, 896),
+    "3:4": (896, 1152),
+    "4:3": (1152, 896),
+    "9:16": (768, 1344),
+    "9:21": (640, 1536),
+}
 
 def download_weights(url, dest, file=False):
     start = time.time()
     print("downloading url: ", url)
     print("downloading to: ", dest)
     if not file:
-        subprocess.check_call(["pget", "-x", url, dest], close_fds=False)
+        subprocess.check_call(["pget", "-xf", url, dest], close_fds=False)
     else:
         subprocess.check_call(["pget", url, dest], close_fds=False)
     print("downloading took: ", time.time() - start)
@@ -35,6 +50,10 @@ class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
         start = time.time()
+        # Dont pull weights
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+        self.weights_cache = WeightsDownloadCache()
 
         print("Loading safety checker...")
         if not os.path.exists(SAFETY_CACHE):
@@ -45,8 +64,8 @@ class Predictor(BasePredictor):
         self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
         
         print("Loading Flux txt2img Pipeline")
-        if not os.path.exists(MODEL_CACHE):
-            download_weights(MODEL_URL, MODEL_CACHE)
+        if not os.path.exists("FLUX.1-schnell"):
+            download_weights(MODEL_URL, ".")
         self.txt2img_pipe = FluxPipeline.from_pretrained(
             MODEL_CACHE,
             torch_dtype=torch.bfloat16
@@ -70,13 +89,8 @@ class Predictor(BasePredictor):
         )
         return image, has_nsfw_concept
 
-    def aspect_ratio_to_width_height(self, aspect_ratio: str):
-        aspect_ratios = {
-            "1:1": (1024, 1024),"16:9": (1344, 768),"21:9": (1536, 640),
-            "3:2": (1216, 832),"2:3": (832, 1216),"4:5": (896, 1088),
-            "5:4": (1088, 896),"9:16": (768, 1344),"9:21": (640, 1536),
-        }
-        return aspect_ratios.get(aspect_ratio)
+    def aspect_ratio_to_width_height(self, aspect_ratio: str) -> tuple[int, int]:
+        return ASPECT_RATIOS[aspect_ratio]
 
     @torch.inference_mode()
     def predict(
@@ -84,7 +98,7 @@ class Predictor(BasePredictor):
         prompt: str = Input(description="Prompt for generated image"),
         aspect_ratio: str = Input(
             description="Aspect ratio for the generated image",
-            choices=["1:1", "16:9", "21:9", "2:3", "3:2", "4:5", "5:4", "9:16", "9:21"],
+            choices=list(ASPECT_RATIOS.keys()),
             default="1:1"),
         num_outputs: int = Input(
             description="Number of images to output.",
@@ -127,9 +141,8 @@ class Predictor(BasePredictor):
         print(f"Using seed: {seed}")
 
         width, height = self.aspect_ratio_to_width_height(aspect_ratio)
-
-        guidance_scale=0.0
         max_sequence_length=256
+        guidance_scale=0.0
 
         flux_kwargs = {}
         print(f"Prompt: {prompt}")
@@ -142,24 +155,41 @@ class Predictor(BasePredictor):
             joint_attention_kwargs={"scale": lora_scale}
             flux_kwargs["joint_attention_kwargs"] = joint_attention_kwargs
             if re.match(r"^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$", hf_lora):
-                print(f"Loading LoRA weights from HF path:{hf_lora}")
-                self.txt2img_pipe.load_lora_weights(hf_lora)
+                print(f"Downloading LoRA weights from - HF path: {hf_lora}")
+                pipe.load_lora_weights(hf_lora)
+            # Check for Replicate tar file
+            elif re.match(r"^https?://replicate.delivery/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+/trained_model.tar", hf_lora):
+                print(f"Downloading LoRA weights from - Replicate URL: {hf_lora}")
+                local_weights_cache = self.weights_cache.ensure(hf_lora)
+                lora_path = os.path.join(local_weights_cache, "output/flux_train_replicate/lora.safetensors")
+                pipe.load_lora_weights(lora_path)
+            # Check for Huggingface URL
             elif re.match(r"^https?://huggingface.co", hf_lora):
-                print(f"Downloading LoRA weights from HF URL: {hf_lora}")
+                print(f"Downloading LoRA weights from - HF URL: {hf_lora}")
                 huggingface_slug = re.search(r"^https?://huggingface.co/([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)", hf_lora).group(1)
-                print(f"HuggingFace slug from URL: {huggingface_slug}")
                 weight_name = hf_lora.split('/')[-1]
-                print(f"Weight name from URL: {weight_name}")
-                self.txt2img_pipe.load_lora_weights(huggingface_slug, weight_name=weight_name)
-            elif re.match(r"^https?://.*\.safetensors$", hf_lora):
-                lora_path = "/tmp/lora.safetensors"
-                if os.path.exists(lora_path):
-                    os.remove(lora_path)
-                print(f"Downloading LoRA weights from URL: {hf_lora}")
-                download_weights(hf_lora, lora_path, file=True)
-                self.txt2img_pipe.load_lora_weights(lora_path)
+                print(f"HuggingFace slug from URL: {huggingface_slug}, weight name: {weight_name}")
+                pipe.load_lora_weights(huggingface_slug, weight_name=weight_name)
+            # Check for Civitai URL
+            elif re.match(r"^https?://civitai.com/api/download/models/[0-9]+\?type=Model&format=SafeTensor", hf_lora):
+                # split url to get first part of the url, everythin before '?type'
+                civitai_slug = hf_lora.split('?type')[0]
+                print(f"Downloading LoRA weights from - Civitai URL: {civitai_slug}")
+                lora_path = self.weights_cache.ensure(hf_lora, file=True)
+                pipe.load_lora_weights(lora_path)
+            # Check for URL to a .safetensors file
+            elif hf_lora.endswith('.safetensors'):
+                print(f"Downloading LoRA weights from - safetensor URL: {hf_lora}")
+                try:
+                    lora_path = self.weights_cache.ensure(hf_lora, file=True)
+                except Exception as e:
+                    raise Exception(f"Error downloading LoRA weights from URL: {e}")
+                pipe.load_lora_weights(lora_path)
             else:
-                raise Exception(f"Invalid parameter for hf_lora, must be a HuggingFace path/URL, or URL to a .safetensors file")
+                raise Exception(f"Invalid lora, must be either a: HuggingFace path, Replicate model.tar URL, or a URL to a .safetensors file: {hf_lora}")
+        else:
+            flux_kwargs["joint_attention_kwargs"] = None
+            pipe.unload_lora_weights()
 
         generator = torch.Generator("cuda").manual_seed(seed)
 
