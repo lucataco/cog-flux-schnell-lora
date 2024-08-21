@@ -17,4 +17,4 @@ __pycache__
 /venv
 
 # Exclude the Flux schnell or dev models from being pushed
-FLUX.1?
+FLUX.1*
