@@ -15,3 +15,6 @@ __pycache__
 
 # Exclude Python virtual environment
 /venv
+
+# Exclude the Flux schnell or dev models from being pushed
+FLUX.1*
